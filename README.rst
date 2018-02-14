@@ -40,6 +40,18 @@ Features
 - Flexible fallbacks, auto-population and more!
 
 
+JS Bundling
+===========
+
+For creating the javascript to the following::
+
+    // Install all dependencies
+    npm install
+
+    // Build and compile the javascript
+    npm run build
+
+
 Project Home
 ------------
 https://github.com/deschler/django-modeltranslation

@@ -1,0 +1,31 @@
+{
+  "name": "django-modeltranslation",
+  "version": "1.0.0",
+  "description": "================ Modeltranslation ================",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "build": "node_modules/rollup/bin/rollup --config rollup.config.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maykinmedia/django-modeltranslation.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/maykinmedia/django-modeltranslation/issues"
+  },
+  "homepage": "https://github.com/maykinmedia/django-modeltranslation#readme",
+  "devDependencies": {
+    "babel-core": "^6.26.0",
+    "babel-minify": "^0.3.0",
+    "babel-plugin-external-helpers": "^6.22.0",
+    "babel-preset-env": "^1.6.1",
+    "rollup": "^0.55.5",
+    "rollup-plugin-babel": "^3.0.3",
+    "rollup-plugin-node-resolve": "^3.0.2"
+  }
+}

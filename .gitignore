@@ -29,3 +29,6 @@ nosetests.xml
 
 # Sphinx
 _build
+
+node_modules/
+.vscode/

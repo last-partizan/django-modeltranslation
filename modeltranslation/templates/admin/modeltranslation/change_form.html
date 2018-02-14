@@ -1,0 +1,61 @@
+{% extends "admin/change_form.html" %}
+{% load staticfiles %}
+
+
+{% block extrahead %}
+    {{ block.super }}
+    <style>
+        .tabs {
+            list-style: none;
+            display: flex;
+            margin: 0;
+            padding: 0;
+            border-bottom: 1px solid #ddd;
+            box-sizing: border-box;
+        }
+        .tabs li {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            /*margin-bottom: -2px;*/
+        }
+        .tabs__tab {
+            display: block;
+            padding: 10px 20px;
+            background-color: #ddd;
+            /*border: 1px #fff solid;*/
+            color: #000;
+            margin: 0;
+            border-radius: 10px 10px 0 0;
+            box-sizing: border-box;
+            margin-left: 5px;
+        }
+        .tabs__tab:hover {
+            background-color: #79aec8;
+            color: #fff;
+        }
+        .tabs__tab.active {
+            background-color: #417690;
+            color: #fff;
+        }
+        .non-active-language {
+            display: none;
+        }
+    </style>
+    <script>
+        var languages = '{{ languages|join:"," }}'.split(',');
+    </script>
+    <script src="{% static 'modeltranslation/js/bundle.js' %}"></script>
+{% endblock extrahead %}
+
+
+{% block content %}
+<ul class="tabs">
+    {% for language in languages %}
+        <li class="">
+            <a class="tabs__tab" href="#{{ language }}" data-lang="{{ language }}">{{ language }}</a>
+        </li>
+    {% endfor %}
+</ul>
+{{ block.super }}
+{% endblock %}

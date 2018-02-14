@@ -406,7 +406,10 @@ class TabbedExternalJqueryTranslationAdmin(TranslationAdmin):
         }
 
 
-if django.VERSION < (1, 6):
-    TabbedTranslationAdmin = TabbedDjango15JqueryTranslationAdmin
-else:
-    TabbedTranslationAdmin = TabbedDjangoJqueryTranslationAdmin
+class TabbedTranslationAdmin(TranslationAdmin):
+    add_form_template = 'admin/modeltranslation/change_form.html'
+    change_form_template = 'admin/modeltranslation/change_form.html'
+
+    def render_change_form(self, request, context, add=False, change=False, form_url='', obj=None):
+        context.update(languages=mt_settings.AVAILABLE_LANGUAGES)
+        return super().render_change_form(request, context, add, change, form_url, obj)
