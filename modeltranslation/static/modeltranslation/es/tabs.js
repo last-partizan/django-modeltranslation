@@ -22,27 +22,27 @@ class Tab {
     }
 
     hide_all_fields() {
-        for (let language of languages) {
+        [].forEach.call(languages, (language) => {
             let fieldsets = document.querySelectorAll('div[class*="_' + language + '"]');
-            for (let fieldset of fieldsets) {
+            [].forEach.call(fieldsets, (fieldset) => {
                 fieldset.classList.add('non-active-language');
-            }
-        }
+            });
+        });
     }
 
     deactivate_all_tabs() {
         let tabs = document.querySelectorAll('.tabs__tab');
-        for(let tab of tabs) {
+        [].forEach.call(tabs, (tab) => {
             tab.classList.remove('active');
-        }
+        });
     }
 
     activate_tab() {
         this.tab.classList.add('active');
         let fieldsets = document.querySelectorAll('div[class*="_' + this.tab.dataset.lang + '"]');
-        for (let fieldset of fieldsets) {
+        [].forEach.call(fieldsets, (fieldset) => {
             fieldset.classList.remove('non-active-language');
-        }
+        });
     }
 };
 
@@ -50,7 +50,7 @@ class Tab {
 
 document.addEventListener("DOMContentLoaded",function(){
     let tabs = document.querySelectorAll('.tabs__tab');
-    tabs.forEach((tab, index) => {
+    [].forEach.call(tabs, (tab, index) => {
         new Tab(tab, first=(index === 0));
     });
 });
