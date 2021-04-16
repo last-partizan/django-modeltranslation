@@ -75,6 +75,10 @@ LOADDATA_RETAIN_LOCALE = getattr(
     settings, "MODELTRANSLATION_LOADDATA_RETAIN_LOCALE", True
 )
 
+LISTEN_TO_BLANK = getattr(
+    settings, "MODELTRANSLATION_LISTEN_TO_BLANK", False
+)
+
 JQUERY_URL = getattr(
     settings,
     "JQUERY_URL",

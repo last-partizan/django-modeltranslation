@@ -125,9 +125,14 @@ class TranslationField(object):
             required_languages = trans_opts.required_languages
             if isinstance(trans_opts.required_languages, (tuple, list)):
                 # All fields
-                if self.language in required_languages:
-                    # self.null = False
-                    self.blank = False
+                if mt_settings.LISTEN_TO_BLANK:
+                    if self.language in required_languages and not self.translated_field.blank:
+                        # self.null = False
+                        self.blank = False
+                else:
+                    if self.language in required_languages:
+                        # self.null = False
+                        self.blank = False
             else:
                 # Certain fields only
                 # Try current language - if not present, try 'default' key
