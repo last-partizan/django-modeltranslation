@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-import datetime
 from decimal import Decimal
+from unittest import skipUnless
+import datetime
+import fnmatch
 import imp
+import io
 import os
 import shutil
 
 import django
+import six
 from django import forms
 from django.conf import settings as django_settings
 from django.contrib.admin.sites import AdminSite
@@ -13,41 +17,24 @@ from django.core.exceptions import ValidationError, ImproperlyConfigured
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import IntegrityError
-from django.db.models import Q, F, Count
+from django.db.models import Q, F, Count, TextField
 from django.test import TestCase, TransactionTestCase
 from django.test.utils import override_settings
-from django.utils import six
 from django.utils.translation import get_language, override, trans_real
 
-try:
-    from django.apps import apps as django_apps
-    NEW_APP_CACHE = True
-except ImportError:
-    from django.db.models.loading import AppCache
-    NEW_APP_CACHE = False
-
-try:
-    from unittest import skipUnless
-except ImportError:
-    # Dummy replacement for Python 2.6
-    def skipUnless(condition, reason):
-        if not condition:
-            def decorator(test_item):
-                return lambda s: 42
-            return decorator
-        return lambda x: x  # identity
+from django.apps import apps as django_apps
 
 from modeltranslation import admin, settings as mt_settings, translator
 from modeltranslation.forms import TranslationModelForm
+from modeltranslation.manager import MultilingualManager
 from modeltranslation.models import autodiscover
 from modeltranslation.tests.test_settings import TEST_SETTINGS
 from modeltranslation.utils import (build_css_class, build_localized_fieldname,
                                     auto_populate, fallbacks)
 
-MIGRATE_CMD = django.VERSION >= (1, 8)
-MIGRATIONS = MIGRATE_CMD and "django.contrib.auth" in TEST_SETTINGS['INSTALLED_APPS']
-NEW_DEFERRED_API = django.VERSION >= (1, 10)
+MIGRATIONS = "django.contrib.auth" in TEST_SETTINGS['INSTALLED_APPS']
 
 models = translation = None
 
@@ -56,7 +43,7 @@ models = translation = None
 request = None
 
 # How many models are registered for tests.
-TEST_MODELS = 31 + (1 if MIGRATIONS else 0)
+TEST_MODELS = 35 + (1 if MIGRATIONS else 0)
 
 
 class reload_override_settings(override_settings):
@@ -76,17 +63,7 @@ def default_fallback():
         MODELTRANSLATION_FALLBACK_LANGUAGES=(mt_settings.DEFAULT_LANGUAGE,))
 
 
-class dummy_context_mgr():
-    def __enter__(self):
-        return None
-
-    def __exit__(self, _type, value, traceback):
-        return False
-
-
 def get_field_names(model):
-    if django.VERSION < (1, 9):
-        return model._meta.get_all_field_names()
     names = set()
     fields = model._meta.get_fields()
     for field in fields:
@@ -103,8 +80,42 @@ def get_field_names(model):
 
 @override_settings(**TEST_SETTINGS)
 class ModeltranslationTransactionTestBase(TransactionTestCase):
-    cache = django_apps if NEW_APP_CACHE else AppCache()
+    cache = django_apps
     synced = False
+
+    @classmethod
+    def _get_migrations_path(cls):
+        return os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "auth_migrations"
+        )
+
+    @classmethod
+    def _copy_migrations(cls):
+        # Locate the original contrib.auth migrations files
+        import django.contrib.auth.migrations as auth_migrations
+        source_dir_path = os.path.dirname(auth_migrations.__file__)
+
+        # Copy them to the local auth_migrations directory
+        target_dir_path = cls._get_migrations_path()
+        for f in os.listdir(source_dir_path):
+            source_path = os.path.join(source_dir_path, f)
+            target_path = os.path.join(target_dir_path, f)
+
+            # Only migration files get copied
+            if os.path.isfile(source_path) and not fnmatch.fnmatch(
+                    f, "__init__.py"
+            ):
+                shutil.copyfile(source_path, target_path)
+
+    @classmethod
+    def _clean_migrations(cls):
+        target_dir_path = cls._get_migrations_path()
+        for f in os.listdir(target_dir_path):
+            target_path = os.path.join(target_dir_path, f)
+            if os.path.isfile(target_path) and not fnmatch.fnmatch(
+                    f, "__init__.py"):
+                os.remove(target_path)
 
     @classmethod
     def setUpClass(cls):
@@ -117,70 +128,63 @@ class ModeltranslationTransactionTestBase(TransactionTestCase):
         if not ModeltranslationTransactionTestBase.synced:
             # In order to perform only one syncdb
             ModeltranslationTransactionTestBase.synced = True
-            mgr = (override_settings(**TEST_SETTINGS) if django.VERSION < (1, 8)
-                   else dummy_context_mgr())
-            with mgr:
-                # 0. Render initial migration of auth
-                if MIGRATIONS:
-                    call_command('makemigrations', 'auth', verbosity=2, interactive=False)
+            # 0. Render initial migration of auth
+            if MIGRATIONS:
+                # Make copies of auth migrations in the (local) auth_migrations
+                # module to setup test database
+                cls._copy_migrations()
+                call_command('makemigrations', 'auth', verbosity=2, interactive=False)
 
-                # 1. Reload translation in case USE_I18N was False
-                from django.utils import translation as dj_trans
-                imp.reload(dj_trans)
+            # 1. Reload translation in case USE_I18N was False
+            from django.utils import translation as dj_trans
+            imp.reload(dj_trans)
 
-                # 2. Reload MT because LANGUAGES likely changed.
-                imp.reload(mt_settings)
-                imp.reload(translator)
-                imp.reload(admin)
+            # 2. Reload MT because LANGUAGES likely changed.
+            imp.reload(mt_settings)
+            imp.reload(translator)
+            imp.reload(admin)
 
-                # 3. Reset test models (because autodiscover have already run, those models
-                #    have translation fields, but for languages previously defined. We want
-                #    to be sure that 'de' and 'en' are available)
-                if not NEW_APP_CACHE:
-                    cls.cache.load_app('modeltranslation.tests')
-                else:
-                    del cls.cache.all_models['tests']
-                    if MIGRATIONS:
-                        del cls.cache.all_models['auth']
-                    import sys
-                    sys.modules.pop('modeltranslation.tests.models', None)
-                    sys.modules.pop('modeltranslation.tests.translation', None)
-                    if MIGRATIONS:
-                        sys.modules.pop('django.contrib.auth.models', None)
-                    tests_args = []
-                    if django.VERSION < (1, 11):
-                        tests_args = [cls.cache.all_models['tests']]
-                    cls.cache.get_app_config('tests').import_models(*tests_args)
-                    if MIGRATIONS:
-                        auth_args = []
-                        if django.VERSION < (1, 11):
-                            auth_args = [cls.cache.all_models['auth']]
-                        cls.cache.get_app_config('auth').import_models(*auth_args)
+            # 3. Reset test models (because autodiscover have already run, those models
+            #    have translation fields, but for languages previously defined. We want
+            #    to be sure that 'de' and 'en' are available)
+            del cls.cache.all_models['tests']
+            if MIGRATIONS:
+                del cls.cache.all_models['auth']
+            import sys
+            sys.modules.pop('modeltranslation.tests.models', None)
+            sys.modules.pop('modeltranslation.tests.translation', None)
+            if MIGRATIONS:
+                sys.modules.pop('django.contrib.auth.models', None)
+            cls.cache.get_app_config('tests').import_models()
+            if MIGRATIONS:
+                cls.cache.get_app_config('auth').import_models()
 
-                # 4. Autodiscover
-                from modeltranslation.models import handle_translation_registrations
-                handle_translation_registrations()
+            # 4. Autodiscover
+            from modeltranslation.models import handle_translation_registrations
+            handle_translation_registrations()
 
-                # 5. makemigrations (``migrate=False`` in case of south)
-                if MIGRATIONS:
-                    call_command('makemigrations', 'auth', verbosity=2, interactive=False)
+            # 5. makemigrations (``migrate=False`` in case of south)
+            if MIGRATIONS:
+                call_command('makemigrations', 'auth', verbosity=2, interactive=False)
+                # At this point there should not be any migrations to generate
+                out = io.StringIO()
+                call_command('makemigrations', 'auth', verbosity=3,
+                             dry_run=True, interactive=False, stdout=out)
+                assert "No changes detected in app 'auth'\n" == out.getvalue(), \
+                    "Unexpected auth migration:\n %s" % out.getvalue()
 
-                # 6. Syncdb (``migrate=False`` in case of south)
-                call_command('migrate', verbosity=0, interactive=False, run_syncdb=True)
+            # 6. Syncdb (``migrate=False`` in case of south)
+            call_command('migrate', verbosity=0, interactive=False, run_syncdb=True)
 
-                # 7. clean migrations
-                if MIGRATIONS:
-                    import glob
-                    dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                       "auth_migrations")
-                    for f in glob.glob(dir + "/000?_*.py*"):
-                        os.unlink(f)
+            # 7. clean migrations
+            if MIGRATIONS:
+                cls._clean_migrations()
 
-                # A rather dirty trick to import models into module namespace, but not before
-                # tests app has been added into INSTALLED_APPS and loaded
-                # (that's why this is not imported in normal import section)
-                global models, translation
-                from modeltranslation.tests import models, translation  # NOQA
+            # A rather dirty trick to import models into module namespace, but not before
+            # tests app has been added into INSTALLED_APPS and loaded
+            # (that's why this is not imported in normal import section)
+            global models, translation
+            from modeltranslation.tests import models, translation  # NOQA
 
     def setUp(self):
         self._old_language = get_language()
@@ -229,10 +233,7 @@ class TestAutodiscover(ModeltranslationTestBase):
     def tearDown(self):
         import sys
         # Rollback model classes
-        if NEW_APP_CACHE:
-            del self.cache.all_models['test_app']
-        else:
-            del self.cache.app_models['test_app']
+        del self.cache.all_models['test_app']
         from .test_app import models
         imp.reload(models)
         # Delete translation modules from import cache
@@ -288,7 +289,7 @@ class TestAutodiscover(ModeltranslationTestBase):
 class ModeltranslationTest(ModeltranslationTestBase):
     """Basic tests for the modeltranslation application."""
     def test_registration(self):
-        langs = tuple(l[0] for l in django_settings.LANGUAGES)
+        langs = tuple(val for val, label in django_settings.LANGUAGES)
         self.assertEqual(langs, tuple(mt_settings.AVAILABLE_LANGUAGES))
         self.assertEqual(2, len(langs))
         self.assertTrue('de' in langs)
@@ -314,7 +315,6 @@ class ModeltranslationTest(ModeltranslationTestBase):
         self.assertRaises(translator.DescendantRegistered,
                           translator.translator.unregister, models.Slugged)
 
-    @skipUnless(NEW_DEFERRED_API, "Django 1.10 needed")
     def test_registration_field_conflicts(self):
         before = len(translator.translator.get_registered_models())
 
@@ -749,9 +749,9 @@ class FileFieldsTest(ModeltranslationTestBase):
         self.assertEqual(inst.image.read(), b'image in english')
 
         # Check if file was actually created in the global storage.
-        self.assertTrue(default_storage.exists(inst.file))
+        self.assertTrue(default_storage.exists(inst.file.path))
         self.assertTrue(inst.file.size > 0)
-        self.assertTrue(default_storage.exists(inst.image))
+        self.assertTrue(default_storage.exists(inst.image.path))
         self.assertTrue(inst.image.size > 0)
 
         trans_real.activate("de")
@@ -953,6 +953,7 @@ class ForeignKeyFieldsTest(ModeltranslationTestBase):
         self.assertIn(fk_option_en, test_inst.foreignkeymodel_set.all())
 
         # Check filtering in reverse way + lookup spanning:
+
         manager = models.TestModel.objects
         trans_real.activate("de")
         self.assertEqual(manager.filter(test_fks=fk_inst_both).count(), 1)
@@ -983,12 +984,9 @@ class ForeignKeyFieldsTest(ModeltranslationTestBase):
         trans_real.activate("de")
         test_inst2 = models.TestModel(title_en='title_en', title_de='title_de')
         test_inst2.save()
-        if django.VERSION >= (1, 9):
-            test_inst2.test_fks.set((fk_inst_de, fk_inst_both))
-            test_inst2.test_fks_en.set((fk_inst_en, fk_inst_both))
-        else:
-            test_inst2.test_fks = [fk_inst_de, fk_inst_both]
-            test_inst2.test_fks_en = (fk_inst_en, fk_inst_both)
+        test_inst2.test_fks.set((fk_inst_de, fk_inst_both))
+        test_inst2.test_fks_en.set((fk_inst_en, fk_inst_both))
+
         self.assertEqual(fk_inst_both.test.pk, test_inst2.pk)
         self.assertEqual(fk_inst_both.test_id, test_inst2.pk)
         self.assertEqual(fk_inst_both.test_de, test_inst2)
@@ -1001,6 +999,31 @@ class ForeignKeyFieldsTest(ModeltranslationTestBase):
         self.assertIn(fk_inst_both, test_inst2.test_fks.all())
         self.assertIn(fk_inst_en, test_inst2.test_fks.all())
         self.assertNotIn(fk_inst_de, test_inst2.test_fks.all())
+
+    def test_reverse_lookup_with_filtered_queryset_manager(self):
+        """
+        Make sure base_manager does not get same queryset filter as TestModel in reverse lookup
+        https://docs.djangoproject.com/en/3.0/topics/db/managers/#base-managers
+        """
+        from modeltranslation.tests.models import FilteredManager
+
+        test_inst = models.FilteredTestModel(title_en='title_en', title_de='title_de')
+        test_inst.save()
+
+        self.assertFalse(models.FilteredTestModel.objects.all().exists())
+        self.assertEqual(models.FilteredTestModel.objects.__class__, FilteredManager)
+        self.assertEqual(models.FilteredTestModel._meta.base_manager.__class__, MultilingualManager)
+
+        # # create objects with relations to test_inst
+        fk_inst = models.ForeignKeyFilteredModel(test=test_inst,
+                                                 title_en='f_title_en', title_de='f_title_de')
+        fk_inst.save()
+        fk_inst.refresh_from_db()   # force to reset cached values
+
+        self.assertEqual(models.ForeignKeyFilteredModel.objects.__class__, MultilingualManager)
+        self.assertEqual(models.ForeignKeyFilteredModel._meta.base_manager.__class__,
+                         MultilingualManager)
+        self.assertEqual(fk_inst.test, test_inst)
 
     def test_non_translated_relation(self):
         non_de = models.NonTranslated.objects.create(title='title_de')
@@ -2002,6 +2025,24 @@ class UpdateCommandTest(ModeltranslationTestBase):
         self.assertEqual('initial', obj1.title_de)
         self.assertEqual('already', obj2.title_de)
 
+    def test_update_command_language_param(self):
+        trans_real.activate('en')
+        pk1 = models.TestModel.objects.create(title_en='').pk
+        pk2 = models.TestModel.objects.create(title_en='already').pk
+        # Due to ``rewrite(False)`` here, original field will be affected.
+        models.TestModel.objects.all().rewrite(False).update(title='initial')
+
+        call_command('update_translation_fields', language='en', verbosity=0)
+
+        obj1 = models.TestModel.objects.get(pk=pk1)
+        obj2 = models.TestModel.objects.get(pk=pk2)
+        self.assertEqual('initial', obj1.title_en)
+        self.assertEqual('already', obj2.title_en)
+
+    def test_update_command_invalid_language_param(self):
+        with self.assertRaises(CommandError):
+            call_command('update_translation_fields', language='xx', verbosity=0)
+
 
 class TranslationAdminTest(ModeltranslationTestBase):
     def setUp(self):
@@ -2199,6 +2240,64 @@ class TranslationAdminTest(ModeltranslationTestBase):
             tuple(ma.get_form(request).base_fields.keys()), tuple(fields))
         self.assertEqual(
             tuple(ma.get_form(request, self.test_obj).base_fields.keys()), tuple(fields))
+
+    def test_model_form_widgets(self):
+        class TestModelForm(forms.ModelForm):
+            class Meta:
+                model = models.TestModel
+                fields = ['text', ]
+                widgets = {
+                    'text': forms.Textarea(attrs={'myprop': 'myval'}),
+                }
+
+        class TestModelAdmin(admin.TranslationAdmin):
+            form = TestModelForm
+
+        ma = TestModelAdmin(models.TestModel, self.site)
+        fields = ['text_de', 'text_en']
+        self.assertEqual(
+            tuple(ma.get_form(request).base_fields.keys()), tuple(fields))
+        self.assertEqual(
+            tuple(ma.get_form(request, self.test_obj).base_fields.keys()), tuple(fields))
+
+        for field in fields:
+            self.assertIn(
+                'myprop',
+                ma.get_form(request).base_fields.get(field).widget.attrs.keys()
+            )
+            self.assertIn(
+                'myval',
+                ma.get_form(request, self.test_obj).base_fields.get(field).widget.attrs.values()
+            )
+
+    def test_widget_ordering_via_formfield_for_dbfield(self):
+        class TestModelAdmin(admin.TranslationAdmin):
+            fields = ['text']
+
+            def formfield_for_dbfield(self, db_field, request, **kwargs):
+                if isinstance(db_field, TextField):
+                    kwargs["widget"] = forms.Textarea(attrs={'myprop': 'myval'})
+                    return db_field.formfield(**kwargs)
+                return super(TestModelAdmin, self).formfield_for_dbfield(
+                    db_field, request, **kwargs
+                )
+
+        ma = TestModelAdmin(models.TestModel, self.site)
+        fields = ['text_de', 'text_en']
+        self.assertEqual(
+            tuple(ma.get_form(request).base_fields.keys()), tuple(fields))
+        self.assertEqual(
+            tuple(ma.get_form(request, self.test_obj).base_fields.keys()), tuple(fields))
+
+        for field in fields:
+            self.assertIn(
+                'myprop',
+                ma.get_form(request).base_fields.get(field).widget.attrs.keys()
+            )
+            self.assertIn(
+                'myval',
+                ma.get_form(request, self.test_obj).base_fields.get(field).widget.attrs.values()
+            )
 
     def test_inline_fieldsets(self):
         class DataInline(admin.TranslationStackedInline):
@@ -2551,6 +2650,13 @@ class TestManager(ModeltranslationTestBase):
         self.assertEqual(titles_for_en, ('most', 'more_en', 'more_de', 'least'))
         self.assertEqual(titles_for_de, ('most', 'more_de', 'more_en', 'least'))
 
+    def test_latest(self):
+        manager = models.ManagerTestModel.objects
+        manager.create(title='more_de', visits_en=1, visits_de=2)
+        instance_2 = manager.create(title='more_en', visits_en=2, visits_de=1)
+        latest_instance = manager.latest("id")
+        self.assertEqual(latest_instance, instance_2)
+
     def assert_fallback(self, method, expected1, *args, **kwargs):
         transform = kwargs.pop('transform', lambda x: x)
         expected2 = kwargs.pop('expected_de', expected1)
@@ -2718,6 +2824,20 @@ class TestManager(ModeltranslationTestBase):
         from modeltranslation.manager import MultilingualManager
         manager = models.CustomManagerTestModel.another_mgr_name
         self.assertTrue(isinstance(manager, MultilingualManager))
+
+    def test_default_manager_for_inherited_models_with_custom_manager(self):
+        """Test if default manager is still set from local managers"""
+        manager = models.CustomManagerChildTestModel._meta.default_manager
+        self.assertEqual('objects', manager.name)
+        self.assertTrue(isinstance(manager, MultilingualManager))
+        self.assertTrue(isinstance(
+            models.CustomManagerChildTestModel.translations,
+            MultilingualManager))
+
+    def test_default_manager_for_inherited_models(self):
+        manager = models.PlainChildTestModel._meta.default_manager
+        self.assertEqual('objects', manager.name)
+        self.assertTrue(isinstance(models.PlainChildTestModel.translations, MultilingualManager))
 
     def test_custom_manager2(self):
         """Test if user-defined queryset is still working"""
@@ -2887,10 +3007,7 @@ class TestManager(ModeltranslationTestBase):
             self.assertEqual('title_de', inst2.title)
 
     def assertDeferredClass(self, item):
-        if NEW_DEFERRED_API:
-            self.assertTrue(len(item.get_deferred_fields()) > 0)
-        else:
-            self.assertTrue(item.__class__._deferred)
+        self.assertTrue(len(item.get_deferred_fields()) > 0)
 
     def test_deferred(self):
         """
@@ -2898,8 +3015,6 @@ class TestManager(ModeltranslationTestBase):
         """
         models.TestModel.objects.create(title_de='title_de', title_en='title_en')
         inst = models.TestModel.objects.only('title_en')[0]
-        if not NEW_DEFERRED_API:
-            self.assertNotEqual(inst.__class__, models.TestModel)
         self.assertTrue(isinstance(inst, models.TestModel))
         self.assertDeferred(False, 'title_en')
 
@@ -2976,7 +3091,7 @@ class TestManager(ModeltranslationTestBase):
         # untrans is nullable so not included when select_related=True
         self.assertNotIn('_untrans_cache', fk_qs.select_related()[0].__dict__)
 
-    @skipUnless(django.VERSION[0] == 2, 'Applicable only to django 2.x')
+    @skipUnless(django.VERSION[0] >= 2, 'Applicable only to django > 2.x')
     def test_select_related_django_2(self):
         test = models.TestModel.objects.create(title_de='title_de', title_en='title_en')
         with auto_populate('all'):
@@ -3049,8 +3164,7 @@ class TestManager(ModeltranslationTestBase):
         # the distinct applies to (this generates a DISTINCT ON (*fields) sql expression).
         # NB: DISTINCT ON expressions must be accompanied by an order_by() that starts with the
         # same fields in the same order
-        if (django_settings.DATABASES['default']['ENGINE'] ==
-                'django.db.backends.postgresql_psycopg2'):
+        if django_settings.DATABASES['default']['ENGINE'] == 'django.db.backends.postgresql':
             titles_for_en = tuple(
                 (m.title, m.description) for m in manager.order_by(
                     'title', 'description').distinct('title'))
@@ -3174,3 +3288,29 @@ class M2MTest(ModeltranslationTestBase):
             # Again: 1 X named "bar" (but through the M2M field)
             x_bar = y.xs.filter(name="bar")
             self.assertIn(x2, x_bar)
+
+
+class InheritedPermissionTestCase(ModeltranslationTestBase):
+
+    @skipUnless(MIGRATIONS, 'migrations/auth not available')
+    def test_managers_failure(self):
+        """This fails with 0.13b."""
+        from modeltranslation.manager import MultilingualManager
+        from django.contrib.auth.models import Permission, User
+        from .models import InheritedPermission
+        self.assertFalse(
+            isinstance(Permission.objects, MultilingualManager),
+            "Permission is using MultilingualManager")
+        self.assertTrue(
+            isinstance(InheritedPermission.objects, MultilingualManager),
+            "InheritedPermission is not using MultilingualManager")
+
+        # This happens at initialization time, depending on the models
+        # initialized.
+        Permission._meta._expire_cache()
+
+        self.assertFalse(
+            isinstance(Permission.objects, MultilingualManager),
+            "Permission is using MultilingualManager")
+        user = User.objects.create(username='123', is_active=True)
+        user.has_perm('test_perm')

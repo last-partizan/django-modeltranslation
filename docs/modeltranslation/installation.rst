@@ -8,18 +8,21 @@ Requirements
 
 Which Modeltranslation version is required for given Django-Python combination to work?
 
-======= ==== ==== ==== ==== ====
+======= ==== ==== ==== ==== ==== ==== ==== ==== ====
 Python  Django
-------- ------------------------
-version 1.8  1.9  1.10 1.11 2.0
-======= ==== ==== ==== ==== ====
+------- --------------------------------------- ----
+version 1.8  1.9  1.10 1.11 2.0  2.1  2.2  3.0  3.2
+======= ==== ==== ==== ==== ==== ==== ==== ==== ====
 2.7     |9|  |11| |12| |13|
 3.2     |9|
 3.3     |9|
 3.4     |9|  |11| |12| |13| |13|
-3.5     |9|  |11| |12| |13| |13|
-3.6                    |13| |13|
-======= ==== ==== ==== ==== ====
+3.5     |9|  |11| |12| |13| |13| |13|
+3.6                    |13| |13| |13| |15| |15| |17|
+3.7                         |13| |13| |15| |15| |17|
+3.8                         |13| |13| |15| |15| |17|
+3.9                         |13| |13| |15| |15| |17|
+======= ==== ==== ==== ==== ==== ==== ==== ==== ====
 
 (``-X`` denotes "up to version X", whereas ``X+`` means "from version X upwards")
 
@@ -27,7 +30,8 @@ version 1.8  1.9  1.10 1.11 2.0
 .. |11| replace:: 0.11+
 .. |12| replace:: 0.12+
 .. |13| replace:: 0.13+
-
+.. |15| replace:: 0.15+
+.. |17| replace:: 0.17+
 
 Using Pip
 ---------
@@ -69,7 +73,7 @@ in detail in the following sections:
 4. Create a ``translation.py`` in your app directory and register
    ``TranslationOptions`` for every model you want to translate.
 
-5. Sync the database using ``python manage.py syncdb``.
+5. Sync the database using ``python manage.py makemigrations`` and ``python manage.py migrate``.
 
    .. note:: This only applies if the models registered in ``translation.py`` haven't been
              synced to the database before. If they have, please read :ref:`db-fields`.

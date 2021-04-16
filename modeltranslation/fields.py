@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
+import six
 from django import VERSION
 from django import forms
 from django.core.exceptions import ImproperlyConfigured
 from django.db.models import fields
-from django.utils import six
 
 from modeltranslation import settings as mt_settings
 from modeltranslation.utils import (
@@ -314,9 +314,10 @@ class TranslationFieldDescriptor(object):
         instance.__dict__[self.field.name] = value
         if isinstance(self.field, fields.related.ForeignKey):
             instance.__dict__[self.field.get_attname()] = None if value is None else value.pk
-        if getattr(instance, '_mt_init', False):
+        if getattr(instance, '_mt_init', False) or getattr(instance, '_mt_disable', False):
             # When assignment takes place in model instance constructor, don't set value.
             # This is essential for only/defer to work, but I think it's sensible anyway.
+            # Setting the localized field may also be disabled by setting _mt_disable.
             return
         loc_field_name = build_localized_fieldname(self.field.name, get_language())
         setattr(instance, loc_field_name, value)
@@ -413,6 +414,6 @@ class LanguageCacheSingleObjectDescriptor(object):
 
     def get_cache_name(self):
         """
-        Used in django 2.x
+        Used in django > 2.x
         """
         return build_localized_fieldname(self.accessor, get_language())

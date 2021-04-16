@@ -3,7 +3,7 @@ from __future__ import unicode_literals
 from django.forms.widgets import Media, Widget, CheckboxInput
 from django.utils.html import conditional_escape
 from django.utils.safestring import mark_safe
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 
 class ClearableWidgetWrapper(Widget):
@@ -57,17 +57,20 @@ class ClearableWidgetWrapper(Widget):
         """
         return self.widget.media + self.checkbox.media + Media(self.Media)
 
-    def render(self, name, value, attrs=None):
+    def render(self, name, value, attrs=None, renderer=None):
         """
         Appends a checkbox for clearing the value (that is, setting the field
         with the ``empty_value``).
         """
-        wrapped = self.widget.render(name, value, attrs)
+        wrapped = self.widget.render(name, value, attrs, renderer)
         checkbox_name = self.clear_checkbox_name(name)
         checkbox_id = self.clear_checkbox_id(checkbox_name)
         checkbox_label = self.clear_checkbox_label
         checkbox = self.checkbox.render(
-            checkbox_name, value == self.empty_value, attrs={'id': checkbox_id})
+            checkbox_name,
+            value == self.empty_value,
+            attrs={'id': checkbox_id},
+            renderer=renderer)
         return mark_safe(self.template.format(
             conditional_escape(wrapped),
             conditional_escape(checkbox_id),
