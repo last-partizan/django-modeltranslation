@@ -1,24 +1,30 @@
-# -*- coding: utf-8 -*-
 from functools import partial
+from typing import Callable, Iterable
 
-from django import VERSION
-from django.utils.six import with_metaclass
+import django
 from django.core.exceptions import ImproperlyConfigured
-from django.db.models import Manager, ForeignKey, OneToOneField
+from django.db.models import ForeignKey, Manager, ManyToManyField, OneToOneField, options
 from django.db.models.base import ModelBase
 from django.db.models.signals import post_init
+from django.utils.functional import cached_property
 
 from modeltranslation import settings as mt_settings
-from modeltranslation.fields import (NONE, create_translation_field, TranslationFieldDescriptor,
-                                     TranslatedRelationIdDescriptor,
-                                     LanguageCacheSingleObjectDescriptor)
-from modeltranslation.manager import (MultilingualManager, MultilingualQuerysetManager,
-                                      rewrite_lookup_key, append_translated)
+from modeltranslation.fields import (
+    NONE,
+    LanguageCacheSingleObjectDescriptor,
+    TranslatedManyToManyDescriptor,
+    TranslatedRelationIdDescriptor,
+    TranslationFieldDescriptor,
+    create_translation_field,
+)
+from modeltranslation.manager import (
+    MultilingualManager,
+    MultilingualQuerysetManager,
+    append_translated,
+    rewrite_lookup_key,
+)
+from modeltranslation.thread_context import auto_populate_mode
 from modeltranslation.utils import build_localized_fieldname, parse_field
-
-
-NEW_RELATED_API = VERSION >= (1, 9)
-NEW_DEFERRED_API = NEW_MANAGER_API = NEW_ABSTRACT_API = VERSION >= (1, 10)
 
 
 class AlreadyRegistered(Exception):
@@ -37,16 +43,17 @@ class FieldsAggregationMetaClass(type):
     """
     Metaclass to handle custom inheritance of fields between classes.
     """
+
     def __new__(cls, name, bases, attrs):
         attrs['fields'] = set(attrs.get('fields', ()))
         for base in bases:
             if isinstance(base, FieldsAggregationMetaClass):
                 attrs['fields'].update(base.fields)
         attrs['fields'] = tuple(attrs['fields'])
-        return super(FieldsAggregationMetaClass, cls).__new__(cls, name, bases, attrs)
+        return super().__new__(cls, name, bases, attrs)
 
 
-class TranslationOptions(with_metaclass(FieldsAggregationMetaClass, object)):
+class TranslationOptions(metaclass=FieldsAggregationMetaClass):
     """
     Translatable fields are declared by registering a model using
     ``TranslationOptions`` class with appropriate ``fields`` attribute.
@@ -66,6 +73,7 @@ class TranslationOptions(with_metaclass(FieldsAggregationMetaClass, object)):
     with translated model. This model may be not translated itself.
     ``related_fields`` contains names of reverse lookup fields.
     """
+
     required_languages = ()
 
     def __init__(self, model):
@@ -75,8 +83,8 @@ class TranslationOptions(with_metaclass(FieldsAggregationMetaClass, object)):
         self.model = model
         self.registered = False
         self.related = False
-        self.local_fields = dict((f, set()) for f in self.fields)
-        self.fields = dict((f, set()) for f in self.fields)
+        self.local_fields = {f: set() for f in self.fields}
+        self.fields = {f: set() for f in self.fields}
         self.related_fields = []
 
     def validate(self):
@@ -93,13 +101,15 @@ class TranslationOptions(with_metaclass(FieldsAggregationMetaClass, object)):
                 for fieldnames in self.required_languages.values():
                     if any(f not in self.fields for f in fieldnames):
                         raise ImproperlyConfigured(
-                            'Fieldname in required_languages which is not in fields option.')
+                            'Fieldname in required_languages which is not in fields option.'
+                        )
 
     def _check_languages(self, languages, extra=()):
         correct = list(mt_settings.AVAILABLE_LANGUAGES) + list(extra)
-        if any(l not in correct for l in languages):
+        if any(lang not in correct for lang in languages):
             raise ImproperlyConfigured(
-                'Language in required_languages which is not in AVAILABLE_LANGUAGES.')
+                'Language in required_languages which is not in AVAILABLE_LANGUAGES.'
+            )
 
     def update(self, other):
         """
@@ -128,6 +138,14 @@ class TranslationOptions(with_metaclass(FieldsAggregationMetaClass, object)):
         return '%s: %s + %s' % (self.__class__.__name__, local, inherited)
 
 
+class MultilingualOptions(options.Options):
+    @cached_property
+    def base_manager(self):
+        manager = super().base_manager
+        patch_manager_class(manager)
+        return manager
+
+
 def add_translation_fields(model, opts):
     """
     Monkey patches the original model class to provide additional fields for
@@ -138,12 +156,13 @@ def add_translation_fields(model, opts):
     model_empty_values = getattr(opts, 'empty_values', NONE)
     for field_name in opts.local_fields.keys():
         field_empty_value = parse_field(model_empty_values, field_name, NONE)
-        for l in mt_settings.AVAILABLE_LANGUAGES:
+        for lang in mt_settings.AVAILABLE_LANGUAGES:
             # Create a dynamic translation field
             translation_field = create_translation_field(
-                model=model, field_name=field_name, lang=l, empty_value=field_empty_value)
+                model=model, field_name=field_name, lang=lang, empty_value=field_empty_value
+            )
             # Construct the name for the localized field
-            localized_field_name = build_localized_fieldname(field_name, l)
+            localized_field_name = build_localized_fieldname(field_name, lang)
             # Check if the model already has a field by that name
 
             if hasattr(model, localized_field_name):
@@ -152,9 +171,11 @@ def add_translation_fields(model, opts):
                     if hasattr(cls, '_meta') and cls.__dict__.get(localized_field_name, None):
                         cls_opts = translator._get_options_for_model(cls)
                         if not cls._meta.abstract or field_name not in cls_opts.local_fields:
-                            raise ValueError("Error adding translation field. Model '%s' already"
-                                             " contains a field named '%s'." %
-                                             (model._meta.object_name, localized_field_name))
+                            raise ValueError(
+                                "Error adding translation field. Model '%s' already"
+                                " contains a field named '%s'."
+                                % (model._meta.object_name, localized_field_name)
+                            )
             # This approach implements the translation fields as full valid
             # django model fields and therefore adds them via add_to_class
             model.add_to_class(localized_field_name, translation_field)
@@ -163,19 +184,49 @@ def add_translation_fields(model, opts):
     # Rebuild information about parents fields. If there are opts.local_fields, field cache would be
     # invalidated (by model._meta.add_field() function). Otherwise, we need to do it manually.
     if len(opts.local_fields) == 0:
-        try:
-            model._meta._fill_fields_cache()
-        except AttributeError:
-            # Django 1.8 removed _fill_fields_cache
-            model._meta._expire_cache()
-            model._meta.get_fields()
+        model._meta._expire_cache()
+        model._meta.get_fields()
 
 
-def has_custom_queryset(manager):
-    "Check whether manager (or its parents) has declared some custom get_queryset method."
-    old_diff = getattr(manager, 'get_query_set', None) != getattr(Manager, 'get_query_set', None)
-    new_diff = getattr(manager, 'get_queryset', None) != getattr(Manager, 'get_queryset', None)
-    return old_diff or new_diff
+def patch_manager_class(manager):
+    if isinstance(manager, MultilingualManager):
+        return
+    if manager.__class__ is Manager:
+        manager.__class__ = MultilingualManager
+    else:
+
+        class NewMultilingualManager(
+            MultilingualManager, manager.__class__, MultilingualQuerysetManager
+        ):
+            _old_module = manager.__module__
+            _old_class = manager.__class__.__name__
+
+            def deconstruct(self):
+                return (
+                    False,  # as_manager
+                    '%s.%s' % (self._old_module, self._old_class),  # manager_class
+                    None,  # qs_class
+                    self._constructor_args[0],  # args
+                    self._constructor_args[1],  # kwargs
+                )
+
+            def __hash__(self):
+                return id(self)
+
+            def __eq__(self, other):
+                if isinstance(other, NewMultilingualManager):
+                    return (
+                        self._old_module == other._old_module
+                        and self._old_class == other._old_class
+                    )
+                if hasattr(other, "__module__") and hasattr(other, "__class__"):
+                    return (
+                        self._old_module == other.__module__
+                        and self._old_class == other.__class__.__name__
+                    )
+                return False
+
+        manager.__class__ = NewMultilingualManager
 
 
 def add_manager(model):
@@ -187,56 +238,18 @@ def add_manager(model):
     """
     if model._meta.abstract:
         return
+    # Make all managers local for this model to fix patching parent model managers
+    added = set(model._meta.managers) - set(model._meta.local_managers)
+    model._meta.local_managers = model._meta.managers
 
-    def patch_manager_class(manager):
-        if isinstance(manager, MultilingualManager):
-            return
-        if manager.__class__ is Manager:
-            manager.__class__ = MultilingualManager
-        else:
-            class NewMultilingualManager(MultilingualManager, manager.__class__,
-                                         MultilingualQuerysetManager):
-                if VERSION < (1, 10):
-                    use_for_related_fields = getattr(
-                        manager.__class__,
-                        "use_for_related_fields",
-                        not has_custom_queryset(manager),
-                    )
-                _old_module = manager.__module__
-                _old_class = manager.__class__.__name__
-
-                def deconstruct(self):
-                    return (
-                        False,  # as_manager
-                        '%s.%s' % (self._old_module, self._old_class),  # manager_class
-                        None,  # qs_class
-                        self._constructor_args[0],  # args
-                        self._constructor_args[1],  # kwargs
-                    )
-
-            manager.__class__ = NewMultilingualManager
-
-    if NEW_MANAGER_API:
-        # Inspired by django.db.models.options.Options.managers (find all
-        # managers by following the normal Python MRO rules), but keeps the
-        # original managers instead of making copies.
-        managers = []
-        seen = set()
-        bases = (b for b in model.mro() if hasattr(b, '_meta'))
-        for base in bases:
-            for manager in base._meta.local_managers:
-                if manager.name in seen:
-                    continue
-                managers.append(manager)
-                seen.add(manager.name)
-
-    else:
-        managers = ((getattr(model, x[1]) for x in
-                     model._meta.concrete_managers + model._meta.abstract_managers))
-
-    for current_manager in managers:
+    for current_manager in model._meta.local_managers:
         prev_class = current_manager.__class__
         patch_manager_class(current_manager)
+        if current_manager in added:
+            # Since default_manager is fetched by order of creation, any manager
+            # moved from parent class to child class needs to receive a new creation_counter
+            # in order to be ordered after the original local managers
+            current_manager._set_creation_counter()
         if model._default_manager.__class__ is prev_class:
             # Normally model._default_manager is a reference to one of model's managers
             # (and would be patched by the way).
@@ -244,11 +257,9 @@ def add_manager(model):
             # model._default_manager is not the same instance as one of managers, but it
             # share the same class.
             model._default_manager.__class__ = current_manager.__class__
-    patch_manager_class(model._base_manager)
-    if VERSION >= (1, 10):
-        model._meta.base_manager_name = 'objects'
-    if hasattr(model._meta, "_expire_cache"):
-        model._meta._expire_cache()
+
+    model._meta.__class__ = MultilingualOptions
+    model._meta._expire_cache()
 
 
 def patch_constructor(model):
@@ -259,13 +270,13 @@ def patch_constructor(model):
 
     def new_init(self, *args, **kwargs):
         self._mt_init = True
-        if NEW_DEFERRED_API or not self._deferred:
-            populate_translation_fields(self.__class__, kwargs)
-            for key, val in list(kwargs.items()):
-                new_key = rewrite_lookup_key(model, key)
-                # Old key is intentionally left in case old_init wants to play with it
-                kwargs.setdefault(new_key, val)
+        populate_translation_fields(self.__class__, kwargs)
+        for key, val in list(kwargs.items()):
+            new_key = rewrite_lookup_key(model, key)
+            # Old key is intentionally left in case old_init wants to play with it
+            kwargs.setdefault(new_key, val)
         old_init(self, *args, **kwargs)
+
     model.__init__ = new_init
 
 
@@ -293,7 +304,12 @@ def patch_clean_fields(model):
                 if orig_field_name in exclude:
                     field.save_form_data(self, value, check=False)
             delattr(self, '_mt_form_pending_clear')
-        old_clean_fields(self, exclude)
+        try:
+            setattr(self, '_mt_disable', True)
+            old_clean_fields(self, exclude)
+        finally:
+            setattr(self, '_mt_disable', False)
+
     model.clean_fields = new_clean_fields
 
 
@@ -310,6 +326,7 @@ def patch_get_deferred_fields(model):
         if hasattr(self, '_fields_were_deferred'):
             sup.update(self._fields_were_deferred)
         return sup
+
     model.get_deferred_fields = new_get_deferred_fields
 
 
@@ -325,44 +342,20 @@ def patch_refresh_from_db(model):
         if fields is not None:
             fields = append_translated(self.__class__, fields)
         return old_refresh_from_db(self, using, fields)
+
     model.refresh_from_db = new_refresh_from_db
-
-
-def patch_metaclass(model):
-    """
-    Monkey patches original model metaclass to exclude translated fields on deferred subclasses.
-    """
-    old_mcs = model.__class__
-
-    class translation_deferred_mcs(old_mcs):
-        """
-        This metaclass is essential for deferred subclasses (obtained via only/defer) to work.
-
-        When deferred subclass is created, some translated fields descriptors could be overridden
-        by DeferredAttribute - which would cause translation retrieval to fail.
-        Prevent this from happening with deleting those attributes from class being created.
-        This metaclass would be called from django.db.models.query_utils.deferred_class_factory
-        """
-        def __new__(cls, name, bases, attrs):
-            if attrs.get('_deferred', False):
-                opts = translator.get_options_for_model(model)
-                were_deferred = set()
-                for field_name in opts.fields.keys():
-                    if attrs.pop(field_name, None):
-                        # Field was deferred. Store this for future reference.
-                        were_deferred.add(field_name)
-                if len(were_deferred):
-                    attrs['_fields_were_deferred'] = were_deferred
-            return super(translation_deferred_mcs, cls).__new__(cls, name, bases, attrs)
-    # Assign to __metaclass__ wouldn't work, since metaclass search algorithm check for __class__.
-    # http://docs.python.org/2/reference/datamodel.html#__metaclass__
-    model.__class__ = translation_deferred_mcs
 
 
 def delete_cache_fields(model):
     opts = model._meta
-    cached_attrs = ('_field_cache', '_field_name_cache', '_name_map', 'fields', 'concrete_fields',
-                    'local_concrete_fields')
+    cached_attrs = (
+        '_field_cache',
+        '_field_name_cache',
+        '_name_map',
+        'fields',
+        'concrete_fields',
+        'local_concrete_fields',
+    )
     for attr in cached_attrs:
         try:
             delattr(opts, attr)
@@ -398,7 +391,7 @@ def populate_translation_fields(sender, kwargs):
     defined (for example to make lookups / filtering without resorting to
     query fallbacks).
     """
-    populate = mt_settings.AUTO_POPULATE
+    populate = auto_populate_mode()
     if not populate:
         return
     if populate is True:
@@ -428,10 +421,11 @@ def patch_related_object_descriptor_caching(ro_descriptor):
     Patch SingleRelatedObjectDescriptor or ReverseSingleRelatedObjectDescriptor to use
     language-aware caching.
     """
+
     class NewSingleObjectDescriptor(LanguageCacheSingleObjectDescriptor, ro_descriptor.__class__):
         pass
 
-    if VERSION[0] == 2:
+    if django.VERSION[0] >= 2:
         ro_descriptor.related.get_cache_name = partial(
             NewSingleObjectDescriptor.get_cache_name,
             ro_descriptor,
@@ -441,14 +435,17 @@ def patch_related_object_descriptor_caching(ro_descriptor):
     ro_descriptor.__class__ = NewSingleObjectDescriptor
 
 
-class Translator(object):
+class Translator:
     """
     A Translator object encapsulates an instance of a translator. Models are
     registered with the Translator using the register() method.
     """
+
     def __init__(self):
         # All seen models (model class -> ``TranslationOptions`` instance).
         self._registry = {}
+        # List of funcs to execute after all imports are done.
+        self._lazy_operations: Iterable[Callable] = []
 
     def register(self, model_or_iterable, opts_class=None, **options):
         """
@@ -470,15 +467,19 @@ class Translator(object):
             if model in self._registry:
                 if self._registry[model].registered:
                     raise AlreadyRegistered(
-                        'Model "%s" is already registered for translation' %
-                        model.__name__)
+                        'Model "%s" is already registered for translation' % model.__name__
+                    )
                 else:
-                    descendants = [d.__name__ for d in self._registry.keys()
-                                   if issubclass(d, model) and d != model]
+                    descendants = [
+                        d.__name__
+                        for d in self._registry.keys()
+                        if issubclass(d, model) and d != model
+                    ]
                     if descendants:
                         raise DescendantRegistered(
                             'Model "%s" cannot be registered after its subclass'
-                            ' "%s"' % (model.__name__, descendants[0]))
+                            ' "%s"' % (model.__name__, descendants[0])
+                        )
 
             # Find inherited fields and create options instance for the model.
             opts = self._get_options_for_model(model, opts_class, **options)
@@ -505,11 +506,11 @@ class Translator(object):
             add_translation_fields(model, opts)
 
         # Delete all fields cache for related model (parent and children)
-        related = ((
-            f for f in model._meta.get_fields()
-            if (f.one_to_many or f.one_to_one) and
-            f.auto_created
-        ) if NEW_RELATED_API else model._meta.get_all_related_objects())
+        related = (
+            f
+            for f in model._meta.get_fields()
+            if (f.one_to_many or f.one_to_one) and f.auto_created
+        )
 
         for related_obj in related:
             delete_cache_fields(related_obj.model)
@@ -521,19 +522,12 @@ class Translator(object):
         patch_constructor(model)
 
         # Connect signal for model
-        if NEW_DEFERRED_API:
-            post_init.connect(delete_mt_init, sender=model)
-        else:
-            # deferred models have their own classes and the `sender` does not match.
-            # Connect signal for all models.
-            post_init.connect(delete_mt_init, dispatch_uid="modeltranslation")
+        post_init.connect(delete_mt_init, sender=model)
 
         # Patch clean_fields to verify form field clearing
         patch_clean_fields(model)
 
         # Patch __metaclass__ and other methods to allow deferring to work
-        if not NEW_DEFERRED_API:
-            patch_metaclass(model)
         patch_get_deferred_fields(model)
         patch_refresh_from_db(model)
 
@@ -549,34 +543,34 @@ class Translator(object):
                 field,
                 fallback_languages=model_fallback_languages,
                 fallback_value=field_fallback_value,
-                fallback_undefined=field_fallback_undefined)
+                fallback_undefined=field_fallback_undefined,
+            )
             setattr(model, field_name, descriptor)
-            if isinstance(field, ForeignKey):
+            if isinstance(field, (ForeignKey, ManyToManyField)):
                 # We need to use a special descriptor so that
                 # _id fields on translated ForeignKeys work
                 # as expected.
-                desc = TranslatedRelationIdDescriptor(field_name, model_fallback_languages)
+                desc_class = (
+                    TranslatedManyToManyDescriptor
+                    if isinstance(field, ManyToManyField)
+                    else TranslatedRelationIdDescriptor
+                )
+                desc = desc_class(field_name, model_fallback_languages)
                 setattr(model, field.get_attname(), desc)
 
                 # Set related field names on other model
-                if NEW_RELATED_API and not field.remote_field.is_hidden():
+                if not field.remote_field.is_hidden():
                     other_opts = self._get_options_for_model(field.remote_field.model)
                     other_opts.related = True
                     other_opts.related_fields.append(field.related_query_name())
                     # Add manager in case of non-registered model
                     add_manager(field.remote_field.model)
-                elif not NEW_RELATED_API and not field.rel.is_hidden():
-                    other_opts = self._get_options_for_model(field.rel.to)
-                    other_opts.related = True
-                    other_opts.related_fields.append(field.related_query_name())
-                    add_manager(field.rel.to)  # Add manager in case of non-registered model
 
             if isinstance(field, OneToOneField):
                 # Fix translated_field caching for SingleRelatedObjectDescriptor
-                sro_descriptor = (
-                    getattr(field.remote_field.model, field.remote_field.get_accessor_name())
-                    if NEW_RELATED_API
-                    else getattr(field.rel.to, field.related.get_accessor_name()))
+                sro_descriptor = getattr(
+                    field.remote_field.model, field.remote_field.get_accessor_name()
+                )
                 patch_related_object_descriptor_caching(sro_descriptor)
 
     def unregister(self, model_or_iterable):
@@ -602,8 +596,8 @@ class Translator(object):
                     # repatching all submodels.
                     raise DescendantRegistered(
                         'You need to unregister descendant "%s" before'
-                        ' unregistering its base "%s"' %
-                        (desc.__name__, model.__name__))
+                        ' unregistering its base "%s"' % (desc.__name__, model.__name__)
+                    )
                 del self._registry[desc]
 
     def get_registered_models(self, abstract=True):
@@ -611,20 +605,25 @@ class Translator(object):
         Returns a list of all registered models, or just concrete
         registered models.
         """
-        return [model for (model, opts) in self._registry.items()
-                if opts.registered and (not model._meta.abstract or abstract)]
+        return [
+            model
+            for (model, opts) in self._registry.items()
+            if opts.registered and (not model._meta.abstract or abstract)
+        ]
 
     def _get_options_for_model(self, model, opts_class=None, **options):
         """
         Returns an instance of translation options with translated fields
         defined for the ``model`` and inherited from superclasses.
         """
-        if not NEW_DEFERRED_API and model._deferred:
-            model = model._meta.proxy_for_model
         if model not in self._registry:
             # Create a new type for backwards compatibility.
-            opts = type("%sTranslationOptions" % model.__name__,
-                        (opts_class or TranslationOptions,), options)(model)
+
+            opts = type(
+                "%sTranslationOptions" % model.__name__,
+                (opts_class or TranslationOptions,),
+                options,
+            )(model)
 
             # Fields for translation may be inherited from abstract
             # superclasses, so we need to look at all parents.
@@ -641,16 +640,24 @@ class Translator(object):
 
         return self._registry[model]
 
-    def get_options_for_model(self, model):
+    def get_options_for_model(self, model) -> TranslationOptions:
         """
         Thin wrapper around ``_get_options_for_model`` to preserve the
         semantic of throwing exception for models not directly registered.
         """
         opts = self._get_options_for_model(model)
         if not opts.registered and not opts.related:
-            raise NotRegistered('The model "%s" is not registered for '
-                                'translation' % model.__name__)
+            raise NotRegistered(
+                'The model "%s" is not registered for ' 'translation' % model.__name__
+            )
         return opts
+
+    def execute_lazy_operations(self) -> None:
+        while self._lazy_operations:
+            self._lazy_operations.pop(0)(translator=self)
+
+    def lazy_operation(self, func: Callable, *args, **kwargs) -> None:
+        self._lazy_operations.append(partial(func, *args, **kwargs))
 
 
 # This global object represents the singleton translator object

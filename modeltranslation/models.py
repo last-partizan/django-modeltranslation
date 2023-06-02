@@ -1,24 +1,23 @@
-# -*- coding: utf-8 -*-
-
-
 def autodiscover():
     """
     Auto-discover INSTALLED_APPS translation.py modules and fail silently when
     not present. This forces an import on them to register.
     Also import explicit modules.
     """
+    import copy
     import os
     import sys
-    import copy
-    from django.utils.module_loading import module_has_submodule
-    from modeltranslation.translator import translator
-    from modeltranslation.settings import TRANSLATION_FILES, DEBUG
-
     from importlib import import_module
+
     from django.apps import apps
+    from django.utils.module_loading import module_has_submodule
+
+    from modeltranslation.settings import DEBUG, TRANSLATION_FILES
+    from modeltranslation.translator import translator
+
     mods = [(app_config.name, app_config.module) for app_config in apps.get_app_configs()]
 
-    for (app, mod) in mods:
+    for app, mod in mods:
         # Attempt to import the app's translation module.
         module = '%s.translation' % app
         before_import_registry = copy.copy(translator._registry)
@@ -39,6 +38,9 @@ def autodiscover():
     for module in TRANSLATION_FILES:
         import_module(module)
 
+    # This executes 'after imports' scheduled operations
+    translator.execute_lazy_operations()
+
     # In debug mode, print a list of registered models and pid to stdout.
     # Note: Differing model order is fine, we don't rely on a particular
     # order, as far as base classes are registered before subclasses.
@@ -47,8 +49,10 @@ def autodiscover():
             if sys.argv[1] in ('runserver', 'runserver_plus'):
                 models = translator.get_registered_models()
                 names = ', '.join(m.__name__ for m in models)
-                print('modeltranslation: Registered %d models for translation'
-                      ' (%s) [pid: %d].' % (len(models), names, os.getpid()))
+                print(
+                    'modeltranslation: Registered %d models for translation'
+                    ' (%s) [pid: %d].' % (len(models), names, os.getpid())
+                )
         except IndexError:
             pass
 

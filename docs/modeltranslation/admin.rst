@@ -38,16 +38,16 @@ method does the following:
    translation field required instead.
 
 
-get_form/get_fieldsets/_declared_fieldsets
+get_form/get_fieldsets
 ******************************************
 
-In addition the ``TranslationBaseModelAdmin`` class overrides ``get_form``,
-``get_fieldsets`` and ``_declared_fieldsets`` to make the options ``fields``,
+In addition the ``TranslationBaseModelAdmin`` class overrides ``get_form`` and
+``get_fieldsets`` to make the options ``fields``,
 ``exclude`` and ``fieldsets`` work in a transparent way. It basically does:
 
 1. Removes the original field from every admin form by adding it to
    ``exclude`` under the hood.
-2. Replaces the - now removed - orginal fields with their corresponding
+2. Replaces the - now removed - original fields with their corresponding
    translation fields.
 
 Taken the ``fieldsets`` option as an example, where the ``title`` field is
