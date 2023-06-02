@@ -431,4 +431,4 @@ class TabbedTranslationAdmin(TranslationAdmin):
     def render_change_form(self, request, context, add=False, change=False, form_url='', obj=None):
         context.update(languages=mt_settings.AVAILABLE_LANGUAGES)
         return super().render_change_form(request, context, add, change, form_url, obj)
-TabbedTranslationAdmin = TabbedDjangoJqueryTranslationAdmin
+
